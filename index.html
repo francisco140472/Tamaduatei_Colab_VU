@@ -1,138 +1,116 @@
+# coding: utf-8
+"""
+Script para download, processamento e visualização de dados do JotForm
+em mapa interativo (Folium).
+
+Autor: Assis
+Data: 2025-09-15
+Descrição:
+    - Faz download automático dos arquivos XLSX do JotForm
+    - Processa e consolida os dados de ocorrências e área de atuação
+    - Gera mapa interativo com marcadores e tabelas resumo em HTML
+    - Exporta o resultado para arquivo HTML local
+"""
+
+import os
 import requests
 import pandas as pd
 import folium
 from io import BytesIO
-import paramiko
-import time
 from datetime import datetime
 
 
-# Montar o Google Drive
-drive.mount('/content/drive')
+# ---------------------------------------------------------------------
+# Configurações
+# ---------------------------------------------------------------------
+URL_OCORRENCIAS = "https://www.jotform.com/excel/242924996615066"
+URL_AREA_ATUACAO = "https://www.jotform.com/excel/243393249284060"
+OUTPUT_PATH = os.path.join(os.getcwd(), "index_Tamandatuai.html")
 
-# URL para o primeiro arquivo JotForm
-url_ocorrencias = "https://www.jotform.com/excel/242924996615066"
 
-# Fazendo o download do primeiro arquivo Excel
-response_ocorrencias = requests.get(url_ocorrencias)
+# ---------------------------------------------------------------------
+# Funções utilitárias
+# ---------------------------------------------------------------------
+def baixar_excel(url: str) -> pd.DataFrame:
+    """Baixa um arquivo Excel do JotForm e retorna um DataFrame Pandas."""
+    try:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        return pd.read_excel(BytesIO(response.content))
+    except requests.RequestException as e:
+        print(f"[ERRO] Falha ao baixar arquivo: {url}\nDetalhes: {e}")
+        return pd.DataFrame()
 
-# Verificando se o download foi bem-sucedido
-if response_ocorrencias.status_code == 200:
-    # Lê o conteúdo do Excel diretamente no pandas
-    df = pd.read_excel(BytesIO(response_ocorrencias.content))
+
+def converter_coluna_numerica(df: pd.DataFrame, coluna: str) -> pd.Series:
+    """Converte coluna de string com vírgula em número float."""
+    if coluna in df.columns:
+        return pd.to_numeric(
+            df[coluna].astype(str).str.replace(",", ".", regex=False),
+            errors="coerce"
+        )
+    return pd.Series(dtype="float64")
+
+
+# ---------------------------------------------------------------------
+# Processamento de dados
+# ---------------------------------------------------------------------
+print("[INFO] Baixando dados de ocorrências...")
+df_ocorrencias = baixar_excel(URL_OCORRENCIAS)
+
+print("[INFO] Baixando dados de área de atuação...")
+df_area = baixar_excel(URL_AREA_ATUACAO)
+
+if df_ocorrencias.empty or df_area.empty:
+    raise SystemExit("[ERRO] Não foi possível carregar os dados necessários.")
+
+# Filtrar ocorrências
+df_ocorrencias = df_ocorrencias.dropna(subset=["NÚCLEO_DE_ATUAÇÃO"])
+
+# Totais principais
+total_ocorrencias = df_ocorrencias["OCORRÊNCIA DE CAMPO CADASTRO"].notna().sum()
+soma_caixa_uma = df_ocorrencias["OCORRÊNCIA DE CAMPO CAIXA UMA"].notna().sum()
+total_quantidade_instalacao = df_ocorrencias["OCORRÊNCIA DE CAMPO LIGAÇÃO"].notna().sum()
+
+# Totais de redes
+df_area["TOTAL DE REDE ESGOTO 200"] = converter_coluna_numerica(df_area, "TOTAL DE REDE ESGOTO 200")
+df_area["TOTAL DE REDE 110 ÁGUA"] = converter_coluna_numerica(df_area, "TOTAL DE REDE 110 ÁGUA")
+
+total_rede_esgoto = df_area["TOTAL DE REDE ESGOTO 200"].sum()
+total_rede_agua = df_area["TOTAL DE REDE 110 ÁGUA"].sum()
+
+print(f"[INFO] Total de Rede de Esgoto: {total_rede_esgoto}")
+print(f"[INFO] Total de Rede de Água: {total_rede_agua}")
+
+# Merge por NÚCLEO_DE_ATUAÇÃO
+if "NÚCLEO_DE_ATUAÇÃO" in df_area.columns:
+    df_merged = df_ocorrencias.merge(
+        df_area[["NÚCLEO_DE_ATUAÇÃO", "REDE ESGOTO 200", "REDE 110 ÁGUA"]],
+        on="NÚCLEO_DE_ATUAÇÃO",
+        how="left"
+    )
 else:
-    print(f"Error ao baixar ocorrências: {response_ocorrencias.status_code}")
-
-# Remove registros onde NÚCLEO_DE_ATUAÇÃO é NaN
-df = df.dropna(subset=['NÚCLEO_DE_ATUAÇÃO'])
-
-# Contagem de registros não nulos em cada coluna
-total_ocorrencias = df['OCORRÊNCIA DE CAMPO CADASTRO'].notna().sum()
-soma_caixa_uma = df['OCORRÊNCIA DE CAMPO CAIXA UMA'].notna().sum()
-total_quantidade_instalacao = df['OCORRÊNCIA DE CAMPO LIGAÇÃO'].notna().sum()
-
-# URL para o segundo arquivo JotForm com dados de redes
-url_area_atuacao = "https://www.jotform.com/excel/243393249284060"
-
-# Fazendo o download do segundo arquivo Excel
-response_area = requests.get(url_area_atuacao)
-
-# Verificando se o download foi bem-sucedido
-if response_area.status_code == 200:
-    # Lê o conteúdo do Excel diretamente no pandas
-    df_area = pd.read_excel(BytesIO(response_area.content))
-else:
-    print(f"Error ao baixar área de atuação: {response_area.status_code}")
-
-# Calcula o total de rede de água e esgoto se as colunas existirem
-
-###################
-# Substitua vírgulas por pontos antes de converter para numérico
-# Certifique-se de que a coluna é string antes de substituir
-df_area['TOTAL DE REDE ESGOTO 200'] = df_area['TOTAL DE REDE ESGOTO 200'].astype(str).str.replace(',', '.', regex=False)
-df_area['TOTAL DE REDE 110 ÁGUA'] = df_area['TOTAL DE REDE 110 ÁGUA'].astype(str).str.replace(',', '.', regex=False)
-
-# Converta para numérico após a substituição
-df_area['TOTAL DE REDE ESGOTO 200'] = pd.to_numeric(df_area['TOTAL DE REDE ESGOTO 200'], errors='coerce')
-df_area['TOTAL DE REDE 110 ÁGUA'] = pd.to_numeric(df_area['TOTAL DE REDE 110 ÁGUA'], errors='coerce')
-
-# Soma dos valores corrigidos
-total_rede_esgoto = df_area['TOTAL DE REDE ESGOTO 200'].sum()
-total_rede_agua = df_area['TOTAL DE REDE 110 ÁGUA'].sum()
-
-print(f"Total de Rede de Esgoto: {total_rede_esgoto}")
-print(f"Total de Rede de Água: {total_rede_agua}")
-
-##########################################################
-
-##########################################################
-## Renomeie 'AREA_DE_ATUACAO' se necessário
-if 'NÚCLEO_DE_ATUAÇÃO' in df_area.columns:
-    df_area = df_area.rename(columns={'NÚCLEO_DE_ATUAÇÃO': 'NÚCLEO_DE_ATUAÇÃO'})
-
-# Verifique se a coluna 'NÚCLEO_DE_ATUAÇÃO' existe em ambos os DataFrames
-if 'NÚCLEO_DE_ATUAÇÃO' in df.columns and 'NÚCLEO_DE_ATUAÇÃO' in df_area.columns:
-    # Garanta que os tipos de dados sejam compatíveis
-    df['NÚCLEO_DE_ATUAÇÃO'] = df['NÚCLEO_DE_ATUAÇÃO'].astype(str)
-    df_area['NÚCLEO_DE_ATUAÇÃO'] = df_area['NÚCLEO_DE_ATUAÇÃO'].astype(str)
-
-    # Execute o merge
-    df = df.merge(df_area[['NÚCLEO_DE_ATUAÇÃO', 'REDE ESGOTO 200', 'REDE 110 ÁGUA']],
-                  on='NÚCLEO_DE_ATUAÇÃO', how='left')
-else:
-    print("A coluna 'NÚCLEO_DE_ATUAÇÃO' não existe em um dos DataFrames.")
+    df_merged = df_ocorrencias.copy()
+    print("[ALERTA] Coluna 'NÚCLEO_DE_ATUAÇÃO' não encontrada em df_area.")
 
 
-# Agrupamento por NÚCLEO_DE_ATUAÇÃO para marcadores
-localizacoes_por_bairro = {}
-for bairro in df['NÚCLEO_DE_ATUAÇÃO'].unique():
-    dados_bairro = df[df['NÚCLEO_DE_ATUAÇÃO'] == bairro]
-    localizacoes = []
-    for index, row in dados_bairro.iterrows():
-        if pd.notna(row['Geolocation']) and ',' in row['Geolocation']:
-            try:
-                lat, lng = map(float, row['Geolocation'].split(','))
-                foto_url = row.get('FOTO_DO_IMOVEL', 'https://via.placeholder.com/150')
-                localizacoes.append((lat, lng, row['BAIRRO'],
-                                     row.get('FUNCIONÁRIO CADASTRO', 'Não informado'),
-                                     row.get('OCORRÊNCIA DE CAMPO CADASTRO', 'Não informada'),
-                                     row.get('IDENTIFICAÇÃO ÚNICA', 'Não informada'),
-                                     foto_url))
-            except ValueError:
-                print(f"Erro ao converter coordenadas: {row['Geolocation']}")
-    localizacoes_por_bairro[bairro] = localizacoes
-
-# Configurações de cores e ícones para bairros
-cores_icones = ['red', 'blue', 'green', 'purple', 'orange', 'darkred', 'lightred', 'beige', 'darkblue', 'darkgreen']
-icons = ['info-sign', 'cloud', 'leaf', 'star', 'ok', 'bookmark', 'cutlery', 'coffee', 'road', 'home']
-cores_bairro = {bairro: (cores_icones[i % len(cores_icones)], icons[i % len(icons)]) for i, bairro in enumerate(localizacoes_por_bairro)}
-
-# Cria o mapa
+# ---------------------------------------------------------------------
+# Construção do Mapa
+# ---------------------------------------------------------------------
 m = folium.Map(location=[-23.55, -46.63], zoom_start=12)
 
-# Adiciona título ao mapa
-title_html = '''
-    <h3 align="center" style="font-size:20px"><b>VU - TAMANDUATEI - ENORSIG</b></h3>
-'''
-m.get_root().html.add_child(folium.Element(title_html))
+# Título
+m.get_root().html.add_child(folium.Element(
+    '<h3 align="center" style="font-size:20px"><b>VU - TAMANDUATEI - ENORSIG</b></h3>'
+))
 
-# Tabela de resumo de ocorrências e redes
-tabela_resumo_html = '''
-<div style="position: fixed;
-            top: 80px; left: 50px; width: 300px;
-            background-color: white;
-            padding: 10px;
-            border: 2px solid grey;
-            z-index: 9999;">
+# Resumo principal
+tabela_resumo_html = f"""
+<div style="position: fixed; top: 80px; left: 50px; width: 300px;
+            background-color: white; padding: 10px; border: 2px solid grey; z-index: 9999;">
     <h4>Resumo de Ocorrências e Redes</h4>
     <table style="width: 100%; border-collapse: collapse; text-align: center;">
-        <tr>
-            <th>Ocorrência</th>
-            <th>Caixa Uma</th>
-            <th>Ligações</th>
-            <th>Rede Água</th>
-            <th>Rede Esgoto</th>
-        </tr>
+        <tr><th>Ocorrência</th><th>Caixa Uma</th><th>Ligações</th><th>Rede Água</th><th>Rede Esgoto</th></tr>
         <tr>
             <td>{total_ocorrencias}</td>
             <td>{soma_caixa_uma}</td>
@@ -142,72 +120,71 @@ tabela_resumo_html = '''
         </tr>
     </table>
 </div>
-'''
-m.get_root().html.add_child(folium.Element(tabela_resumo_html.format(
-    total_ocorrencias=total_ocorrencias,
-    soma_caixa_uma=soma_caixa_uma,
-    total_quantidade_instalacao=total_quantidade_instalacao,
-    total_rede_agua=total_rede_agua,
-    total_rede_esgoto=total_rede_esgoto
-)))
-########################################################
-# Adicionar contagem por tipo de "OCORRÊNCIA DE CAMPO CADASTRO"
-total_por_tipo = df['OCORRÊNCIA DE CAMPO CADASTRO'].value_counts()
+"""
+m.get_root().html.add_child(folium.Element(tabela_resumo_html))
 
-# Adicionar contagem de cadastro por dia, mantendo apenas a última data
-df['DATA CADASTRO'] = pd.to_datetime(df['DATA CADASTRO'], errors='coerce')
-total_por_dia = df.groupby(df['DATA CADASTRO'].dt.date).size()
+# Resumo por tipo e última data
+df_merged["DATA CADASTRO"] = pd.to_datetime(df_merged["DATA CADASTRO"], errors="coerce")
+total_por_tipo = df_merged["OCORRÊNCIA DE CAMPO CADASTRO"].value_counts()
+total_por_dia = df_merged.groupby(df_merged["DATA CADASTRO"].dt.date).size()
 ultima_data = total_por_dia.index[-1] if not total_por_dia.empty else None
 total_ultima_data = total_por_dia[ultima_data] if ultima_data else 0
 
-# Tabela HTML com total por tipo e apenas a última data, abaixo da primeira tabela
-tabela_tipo_ultima_data_html = '''
-<div style="position: fixed;
-            top: 320px; left: 50px; width: 300px;
-            background-color: white;
-            padding: 10px;
-            border: 2px solid grey;
-            z-index: 9999;">
+tabela_tipo_html = """
+<div style="position: fixed; top: 320px; left: 50px; width: 300px;
+            background-color: white; padding: 10px; border: 2px solid grey; z-index: 9999;">
     <h4>Resumo por Tipo</h4>
     <table style="width: 100%; border-collapse: collapse; text-align: center;">
-        <tr>
-            <th style="border: 1px solid black; padding: 5px; text-align: center;">Tipo de Ocorrência</th>
-            <th style="border: 1px solid black; padding: 5px; text-align: center;">Total</th>
-        </tr>''' + ''.join([f'''
-        <tr>
-            <td style="border: 1px solid black; padding: 5px;">{tipo}</td>
-            <td style="border: 1px solid black; padding: 5px;">{total}</td>
-        </tr>''' for tipo, total in total_por_tipo.items()]) + '''
+        <tr><th>Tipo de Ocorrência</th><th>Total</th></tr>
+""" + "".join([
+    f"<tr><td>{tipo}</td><td>{total}</td></tr>"
+    for tipo, total in total_por_tipo.items()
+]) + f"""
     </table>
-
-
-
-
     <h4>Última Data</h4>
     <table style="width: 100%; border-collapse: collapse; text-align: center;">
-        <tr>
-            <th style="border: 1px solid black; padding: 5px; text-align: center;">Data</th>
-            <th style="border: 1px solid black; padding: 5px; text-align: center;">Total</th>
-        </tr>
-        <tr>
-            <td style="border: 1px solid black; padding: 5px;">{ultima_data}</td>
-            <td style="border: 1px solid black; padding: 5px;">{total_ultima_data}</td>
-        </tr>
+        <tr><th>Data</th><th>Total</th></tr>
+        <tr><td>{ultima_data.strftime('%Y-%m-%d') if ultima_data else 'N/A'}</td>
+            <td>{total_ultima_data}</td></tr>
     </table>
-
 </div>
-'''
+"""
+m.get_root().html.add_child(folium.Element(tabela_tipo_html))
 
-# Adiciona a tabela de tipo e última data ao mapa
-m.get_root().html.add_child(folium.Element(tabela_tipo_ultima_data_html.format(
-    ultima_data=ultima_data.strftime('%Y-%m-%d') if ultima_data else 'N/A',
-    total_ultima_data=total_ultima_data
-)))
+# ---------------------------------------------------------------------
+# Marcadores por núcleo
+# ---------------------------------------------------------------------
+localizacoes_por_bairro = {}
+for bairro in df_merged["NÚCLEO_DE_ATUAÇÃO"].unique():
+    dados_bairro = df_merged[df_merged["NÚCLEO_DE_ATUAÇÃO"] == bairro]
+    localizacoes = []
+    for _, row in dados_bairro.iterrows():
+        if pd.notna(row.get("Geolocation")) and "," in row["Geolocation"]:
+            try:
+                lat, lng = map(float, row["Geolocation"].split(","))
+                foto_url = row.get("FOTO_DO_IMOVEL", "https://via.placeholder.com/150")
+                localizacoes.append((
+                    lat, lng, bairro,
+                    row.get("FUNCIONÁRIO CADASTRO", "Não informado"),
+                    row.get("OCORRÊNCIA DE CAMPO CADASTRO", "Não informada"),
+                    row.get("IDENTIFICAÇÃO ÚNICA", "Não informada"),
+                    foto_url
+                ))
+            except ValueError:
+                print(f"[ERRO] Coordenadas inválidas: {row['Geolocation']}")
+    localizacoes_por_bairro[bairro] = localizacoes
 
+# Cores e ícones
+cores_icones = ['red', 'blue', 'green', 'purple', 'orange', 'darkred',
+                'lightred', 'beige', 'darkblue', 'darkgreen']
+icons = ['info-sign', 'cloud', 'leaf', 'star', 'ok', 'bookmark',
+         'cutlery', 'coffee', 'road', 'home']
+cores_bairro = {
+    bairro: (cores_icones[i % len(cores_icones)], icons[i % len(icons)])
+    for i, bairro in enumerate(localizacoes_por_bairro)
+}
 
-#################################3
-
-# Adicionar marcadores para cada núcleo e camada
+# Adicionar marcadores
 for bairro, localizacoes in localizacoes_por_bairro.items():
     cor, icone = cores_bairro[bairro]
     feature_group = folium.FeatureGroup(name=bairro)
@@ -228,29 +205,10 @@ for bairro, localizacoes in localizacoes_por_bairro.items():
         ).add_to(feature_group)
     feature_group.add_to(m)
 
-# Controle de camadas
 folium.LayerControl().add_to(m)
 
-# Nome do arquivo que será salvo
-output_path = '/content/drive/MyDrive/TAMANDUATEI/index_Tamaduatei.html'
-
-# Salva o mapa em HTML no Google Drive
-m.save(output_path)
-
-print(f"HTML salvo com sucesso no Google Drive: {output_path}")
-
-#########################################################################################
-# Move o arquivo HTML gerado para o diretório do repositório
-#!mv Tamanduatei_Vu_Enorsul.github.io/JOTFORM_VU_TAMANDUATI.ipynb
-
-# Acesse o diretório do repositório
-#%cd Tamanduatei_Vu_Enorsul.github.io
-
-# Adicione o arquivo gerado ao controle de versão
-#!git add index.html
-
-# Commit com uma mensagem personalizada
-#!git commit -m "Atualização automática do arquivo index.html"
-
-# Push para o repositório remoto
-#!git push origin main  # Substitua "main" pelo nome da branch principal, se necessário
+# ---------------------------------------------------------------------
+# Exportação
+# ---------------------------------------------------------------------
+m.save(OUTPUT_PATH)
+print(f"[SUCESSO] Mapa salvo em: {OUTPUT_PATH}")
